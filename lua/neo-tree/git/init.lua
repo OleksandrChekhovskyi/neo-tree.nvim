@@ -203,8 +203,12 @@ local porcelain_flag = {
 ---@return string[] args
 local make_git_status_cmd = function(porcelain_version, worktree_root, opts)
   opts = opts or {}
-  opts.ignored = opts.ignored or "traditional"
   opts.untracked_files = opts.untracked_files or "normal"
+  -- "traditional" descends into ignored directories (e.g. node_modules) and is very slow
+  -- in large repos; git rejects "matching" together with --untracked-files=no.
+  if not opts.ignored then
+    opts.ignored = opts.untracked_files == "no" and "no" or "matching"
+  end
   local args = git_cmd.with_args({
     "-C",
     worktree_root,
