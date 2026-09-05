@@ -92,17 +92,18 @@ local start_resize_monitor = function()
         else
           speed_up_loops = 0
         end
-        vim.defer_fn(check_window_size, this_interval)
+        resize_monitor_timer = vim.defer_fn(check_window_size, this_interval)
       else
         log.trace("No windows exist, stopping resize monitor")
+        resize_monitor_timer = nil
       end
     else
       log.debug("Error checking window size:", err)
-      vim.defer_fn(check_window_size, math.max(interval * 5, 1000))
+      resize_monitor_timer = vim.defer_fn(check_window_size, math.max(interval * 5, 1000))
     end
   end
 
-  vim.defer_fn(check_window_size, interval)
+  resize_monitor_timer = vim.defer_fn(check_window_size, interval)
 end
 
 ---Safely closes the window and deletes the buffer associated with the state
