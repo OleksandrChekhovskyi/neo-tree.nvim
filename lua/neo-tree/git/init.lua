@@ -26,7 +26,7 @@ local M = {}
 ---@class neotree.git.WorktreeInfo
 ---@field git_dir string
 ---@field status_diff table<string, neotree.git.Status?>
----@field watcher neotree.sources.filesystem.Watcher?
+---@field watched_dirs string[]?
 ---@field superproject_worktree_root string?
 ---@field status neotree.git.Status?
 ---@field status_progress neotree.git.WorktreeInfo.StatusProgress
@@ -71,7 +71,7 @@ local try_register_worktree = function(worktree_root, git_dir, superproject_work
     -- After each render, there will do watcher.references - 1. When watcher.references == 0,
     -- the watcher will stop. Therefore, every time a git status refresh is triggered,
     -- watch_folder need to be triggered to do watcher.references + 1.
-    worktree.watcher = require("neo-tree.git.watch").watch(worktree_root, git_dir)
+    worktree.watched_dirs = require("neo-tree.git.watch").watch(worktree_root, git_dir)
   end
 
   return new_worktree
