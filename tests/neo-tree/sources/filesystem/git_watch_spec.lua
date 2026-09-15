@@ -116,4 +116,44 @@ describe("Filesystem git status watching", function()
 
     verify_status_becomes(file, nil)
   end)
+
+  it("does not retain modifications committed between the fast and full status", function()
+    local root, file = create_repo_with_written_tree()
+    git_cmd(root, "commit", "--quiet", "-m", "initial")
+    u.fs.write_file(file, { "modified" })
+    show_tree(root)
+    local amended = false
+    require("neo-tree.events").subscribe({
+      event = require("neo-tree.events").BEFORE_GIT_STATUS,
+      handler = function(args)
+        if
+          args.git_root == root
+          and vim.tbl_contains(args.status_args, "--untracked-files=normal")
+          and not amended
+        then
+          amended = true
+          -- Commit in the status subprocess, after the fast result has been parsed.
+          for i, arg in ipairs(args.status_args) do
+            if arg == "status" then
+              args.status_args[i] = "test-amend-status"
+              table.insert(
+                args.status_args,
+                i,
+                "alias.test-amend-status="
+                  .. "!git -c user.name=Test -c user.email=test@example.invalid"
+                  .. " commit --quiet -a --amend --no-edit && git status"
+              )
+              table.insert(args.status_args, i, "-c")
+              break
+            end
+          end
+        end
+      end,
+    })
+    verify.eventually(function()
+      return amended
+    end, "full status did not run", TIMEOUT)
+    verify_status_becomes(file, nil)
+    assert.are.equal("", git_cmd(root, "status", "--porcelain"))
+  end)
 end)

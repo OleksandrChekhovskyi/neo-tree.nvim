@@ -341,6 +341,8 @@ local git_status_job = function(cmd, context, on_parsed, skip_bubbling)
     end
     raw_status_text_cache[context.worktree_root] = status_text
 
+    -- Each command is a new snapshot: files may have become clean since the fast pass.
+    context.git_status = {}
     local status_iter = utils.gsplit_plain(status_text, "\000")
     local parsing_task = co.create(parser.parse_status_porcelain)
     local first_output = {
