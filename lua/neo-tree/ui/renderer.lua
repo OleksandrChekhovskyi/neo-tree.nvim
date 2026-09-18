@@ -1231,7 +1231,9 @@ end
 
 ---Attaches autocmds that set options in any window containing a neo-tree buffer.
 M.setup_option_autocmds = function()
-  local option_augroup = vim.api.nvim_create_augroup("NeoTreeOptions", { clear = false })
+  -- Cleared, since setup() runs again whenever a config is reloaded and these would
+  -- otherwise stack up one more copy of themselves each time.
+  local option_augroup = vim.api.nvim_create_augroup("NeoTreeOptions", { clear = true })
   autocmd({ "BufWinEnter", "BufEnter", "TabEnter", "WinEnter" }, {
     group = option_augroup,
     callback = function()
@@ -1240,6 +1242,7 @@ M.setup_option_autocmds = function()
   })
   events.subscribe({
     event = events.NEO_TREE_WINDOW_AFTER_OPEN,
+    id = "neo-tree.ui.renderer.window_options",
     handler = function(args)
       -- guards against https://github.com/nvim-neo-tree/neo-tree.nvim/issues/1674
       set_options_in_win(args.winid)

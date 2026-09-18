@@ -40,23 +40,39 @@ end
 
 ---Idempotently start the watcher on the path
 ---@param path string
+---@return boolean started
 function Watcher:start(path)
-  if not self.active then
-    self.handle:start(path, flags, function(err, fname)
-      if err == "EPERM" then
-        self:stop()
-      end
-      self.callback(err, fname)
-    end)
-    self.active = true
+  if self.active then
+    return true
   end
+  if not self.handle then
+    local handle, err = uv.new_fs_event()
+    if not handle then
+      log.debug("Can't make fs event:", err)
+      return false
+    end
+    self.handle = handle
+  end
+  self.handle:start(path, flags, function(err, fname)
+    if err == "EPERM" then
+      self:stop()
+    end
+    self.callback(err, fname)
+  end)
+  self.active = true
+  return true
 end
 
+---Stops watching and releases the handle. libuv holds a stopped handle until it is
+---closed, so a session that browses many directories would otherwise pile them up
+---for the rest of its life.
 function Watcher:stop()
-  if self.active then
+  if self.handle and not self.handle:is_closing() then
     self.handle:stop()
-    self.active = false
+    self.handle:close()
   end
+  self.handle = nil
+  self.active = false
 end
 
 ---Watch a directory for changes to it's children. Not recursive.
@@ -71,13 +87,9 @@ M.watch_folder = function(path, callback)
     return w
   end
   log.trace("Creating new fs watch on:", path)
-  local handle, err = uv.new_fs_event()
-  if not handle then
-    log.debug("Can't make fs event:", err)
-    return nil
-  end
+  -- The handle is made on start, so that a watcher which has been stopped and later
+  -- wanted again gets a fresh one instead of holding a closed handle.
   w = Watcher:new({
-    handle = handle,
     references = 1,
     active = false,
     callback = callback,
@@ -95,6 +107,9 @@ M.updated_watched = function()
     else
       log.trace("No more references for fs watch on:", path, ", stopping.")
       w:stop()
+      -- Dropping it here keeps the registry proportional to what is being watched
+      -- rather than to every directory this session has ever visited.
+      watchers[path] = nil
     end
   end
 end

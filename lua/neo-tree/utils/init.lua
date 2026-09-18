@@ -1841,9 +1841,16 @@ M.job = function(cmd, opts, on_exit)
   spawnopts.hide = true
   spawnopts.stdio = { nil, stdout, stderr }
 
-  local handle, pid_or_err = uv.spawn(path, spawnopts, function(code, _)
+  -- libuv holds a process handle until it is closed, and with it the callback and
+  -- everything it captures, including this run's output. Neo-tree runs a git command
+  -- for every refresh, so leaving them open leaks for the whole session.
+  local handle, pid_or_err
+  handle, pid_or_err = uv.spawn(path, spawnopts, function(code, _)
     exit_code = code
     process_exited = true
+    if handle and not handle:is_closing() then
+      handle:close()
+    end
     try_finish()
   end)
 
