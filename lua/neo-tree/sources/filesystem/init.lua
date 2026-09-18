@@ -406,7 +406,20 @@ M.setup = function(config, global_config)
   if global_config.enable_git_status then
     manager.subscribe(M.name, {
       event = events.GIT_EVENT,
-      handler = wrap(manager.refresh),
+      ---@param args neotree.event.args.GIT_EVENT?
+      handler = function(args)
+        manager.refresh(M.name)
+        -- Refreshing only navigates, and navigating runs a status for the tree
+        -- root's own worktree. A repository below the root, such as a nested
+        -- checkout or a submodule, has nothing else to refresh it.
+        if args and args.git_root then
+          if git_status_async_enabled then
+            git.status_async(args.git_root, nil, global_config.git_status_async_options)
+          else
+            git.status(args.git_root, nil, false)
+          end
+        end
+      end,
     })
     manager.subscribe(M.name, {
       event = events.GIT_STATUS_CHANGED,

@@ -39,6 +39,59 @@ local M = {}
 ---@type table<string, neotree.git.WorktreeInfo?>
 M.worktrees = {}
 
+---@type table<string, string>
+local raw_status_text_cache = setmetatable({}, weak_k)
+
+---Every `git status` run is numbered, so that a slow one cannot land on top of the
+---result of a newer one. The cached raw output is written only when a result is
+---actually applied, which keeps it describing the status neo-tree is showing: once
+---the two drifted apart, an outdated status became permanent, because every later
+---run with the same output short-circuits to whatever is stored.
+---@type table<string, integer>
+local issued_status_seq = {}
+---@type table<string, integer>
+local applied_status_seq = {}
+
+---@param worktree_root string
+---@return integer seq
+local next_status_seq = function(worktree_root)
+  local seq = (issued_status_seq[worktree_root] or 0) + 1
+  issued_status_seq[worktree_root] = seq
+  return seq
+end
+
+---Takes ownership of a worktree's status for one run, unless a newer one got there
+---first. Runs are only ever superseded, never interleaved: a dropped result leaves
+---both the status and the cached output belonging to the newer run.
+---@param worktree_root string
+---@param seq integer
+---@param status_text string? Raw output this result came from, for `git status` runs.
+---@return boolean claimed
+local claim_status = function(worktree_root, seq, status_text)
+  if seq < (applied_status_seq[worktree_root] or 0) then
+    return false
+  end
+  applied_status_seq[worktree_root] = seq
+  if status_text then
+    raw_status_text_cache[worktree_root] = status_text
+  end
+  return true
+end
+
+---@param context neotree.git.JobContext
+---@return boolean
+local superseded = function(context)
+  return context.seq < (applied_status_seq[context.worktree_root] or 0)
+end
+
+---Drops what is remembered about a worktree's status, so that a repository at the
+---same path later does not inherit it. The sequence numbers deliberately stay,
+---otherwise a run still in flight for the old worktree could claim the new one.
+---@param worktree_root string
+local forget_status = function(worktree_root)
+  raw_status_text_cache[worktree_root] = nil
+end
+
 ---@param worktree_root string
 ---@param git_dir string
 ---@param superproject_worktree_root string?
@@ -67,10 +120,9 @@ local try_register_worktree = function(worktree_root, git_dir, superproject_work
 
   local config = require("neo-tree").config
   if config.filesystem.use_libuv_file_watcher then
-    -- Fix issue(https://github.com/nvim-neo-tree/neo-tree.nvim/issues/724)
-    -- After each render, there will do watcher.references - 1. When watcher.references == 0,
-    -- the watcher will stop. Therefore, every time a git status refresh is triggered,
-    -- watch_folder need to be triggered to do watcher.references + 1.
+    -- The watchers belong to the worktree and outlive every render; watching again
+    -- here only reconciles the set, which is how a ref directory that HEAD has since
+    -- moved to gets picked up.
     worktree.watched_dirs = require("neo-tree.git.watch").watch(worktree_root, git_dir)
   end
 
@@ -79,11 +131,12 @@ end
 
 ---@param worktree_root string
 local delete_worktree = function(worktree_root)
-  local existing_worktree = log.assert(
-    M.worktrees[worktree_root],
-    "Could not find worktree to delete for " .. worktree_root
-  )
-  M.worktrees[existing_worktree] = nil
+  log.assert(M.worktrees[worktree_root], "Could not find worktree to delete for " .. worktree_root)
+  require("neo-tree.git.watch").unwatch(worktree_root)
+  -- Keyed by the root, not by the worktree it holds; indexing by the table left
+  -- every "deleted" worktree in place, still serving its last status.
+  M.worktrees[worktree_root] = nil
+  forget_status(worktree_root)
   -- deleting worktree, invalidate root dir lookups
   M._upward_worktree_cache = setmetatable({}, weak_kv)
   vim.schedule(function()
@@ -109,9 +162,6 @@ local invalidate_upward_worktrees = function(path)
     parent = utils.split_path(parent)
   end
 end
-
----@type table<string, string>
-local raw_status_text_cache = setmetatable({}, weak_k)
 
 ---@alias (private) neotree.git._StatusPorcelainVersion
 ---|1
@@ -274,13 +324,14 @@ M.status = function(path, base_lookup, skip_bubbling, status_opts)
   local raw_status_text = vim.fn.system(status_cmd)
   assert(vim.v.shell_error == 0, raw_status_text)
 
+  local seq = next_status_seq(worktree_root)
   local last_status_text = raw_status_text_cache[worktree_root]
   local status_text = raw_status_text:gsub("\001", "\000") -- to make the following cache check work
   if status_text == last_status_text then
     -- return the current status
+    claim_status(worktree_root, seq)
     return M.worktrees[worktree_root].status, worktree_root
   end
-  raw_status_text_cache[worktree_root] = status_text
 
   skip_bubbling = not not skip_bubbling
   local status_iter = utils.gsplit_plain(status_text, "\000")
@@ -299,6 +350,9 @@ M.status = function(path, base_lookup, skip_bubbling, status_opts)
       skip_bubbling
     )
   end
+  if not claim_status(worktree_root, seq, status_text) then
+    return M.worktrees[worktree_root].status, worktree_root
+  end
   change_worktree_git_status(
     worktree_root,
     git_status,
@@ -316,7 +370,7 @@ end
 ---Creates a job for `git status`
 ---@param cmd string[] nil to use default of make_git_status_args, which includes all files
 ---@param context neotree.git.JobContext
----@param on_parsed fun(gs: neotree.git.Status?, err: string?)
+---@param on_parsed fun(gs: neotree.git.Status?, err: string?, status_text: string?)
 ---@param skip_bubbling boolean?
 local git_status_job = function(cmd, context, on_parsed, skip_bubbling)
   utils.job(cmd, nil, function(code, stdout_chunks, stderr_chunks)
@@ -327,7 +381,12 @@ local git_status_job = function(cmd, context, on_parsed, skip_bubbling)
         table.concat(stdout_chunks),
         table.concat(stderr_chunks)
       )
-      on_parsed(nil)
+      on_parsed(nil, err)
+      return
+    end
+
+    if superseded(context) then
+      log.trace("git status for", context.worktree_root, "was superseded, dropping it")
       return
     end
 
@@ -336,10 +395,10 @@ local git_status_job = function(cmd, context, on_parsed, skip_bubbling)
     ---@class neotree.git.StatusJobResult
     if status_text == past_raw_status_text then
       -- stdout text did not change.
-      on_parsed(M.worktrees[context.worktree_root].status)
+      local worktree = M.worktrees[context.worktree_root]
+      on_parsed(worktree and worktree.status, nil, status_text)
       return
     end
-    raw_status_text_cache[context.worktree_root] = status_text
 
     -- Each command is a new snapshot: files may have become clean since the fast pass.
     context.git_status = {}
@@ -361,7 +420,7 @@ local git_status_job = function(cmd, context, on_parsed, skip_bubbling)
       first_output,
       function(success, status_or_err)
         if success then
-          on_parsed(status_or_err)
+          on_parsed(status_or_err, nil, status_text)
         else
           on_parsed(nil, status_or_err)
         end
@@ -406,6 +465,8 @@ M.status_async = function(path, base_lookup, opts, callback)
         local ctx = {
           porcelain_version = git_status_porcelain_version,
           worktree_root = worktree_root,
+          ---@type integer
+          seq = next_status_seq(worktree_root),
           paths = paths,
           ---@type neotree.git.Status
           git_status = {},
@@ -427,8 +488,8 @@ M.status_async = function(path, base_lookup, opts, callback)
           paths = ctx.paths,
         })
 
-        git_status_job(first_cmd, ctx, function(fast_status)
-          if not fast_status then
+        git_status_job(first_cmd, ctx, function(fast_status, _, status_text)
+          if not fast_status or not claim_status(worktree_root, ctx.seq, status_text) then
             return
           end
 
@@ -439,7 +500,7 @@ M.status_async = function(path, base_lookup, opts, callback)
 
           if base then
             git_diff.name_status_job(worktree_root, base, false, ctx, function(ok, status)
-              if ok then
+              if ok and claim_status(worktree_root, ctx.seq) then
                 change_worktree_git_status(worktree_root, ctx.git_status, base, status)
               end
               if status_existed then
@@ -456,6 +517,10 @@ M.status_async = function(path, base_lookup, opts, callback)
           git_ls_files.ignored_job(ctx, function(ignored_paths, err)
             if not ignored_paths then
               log.error(err)
+              return
+            end
+            if not claim_status(worktree_root, ctx.seq) then
+              return
             end
             for _, ignored_path in ipairs(ignored_paths) do
               ctx.git_status[ignored_path] = "!"
@@ -503,9 +568,12 @@ M.status_async = function(path, base_lookup, opts, callback)
               local full_cmd = make_git_status_cmd(git_status_porcelain_version, worktree_root, {
                 paths = ctx.paths,
               })
-              git_status_job(full_cmd, ctx, function(full_status, err)
+              git_status_job(full_cmd, ctx, function(full_status, err, status_text)
                 if not full_status then
                   log.error(err)
+                  return
+                end
+                if not claim_status(worktree_root, ctx.seq, status_text) then
                   return
                 end
                 change_worktree_git_status(worktree_root, full_status, nil, nil, {

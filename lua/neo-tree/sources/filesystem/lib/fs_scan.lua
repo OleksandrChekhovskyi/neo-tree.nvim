@@ -794,14 +794,9 @@ M.stop_watchers = function(state)
       return node.type == "directory" and node.loaded
     end)
 
-    for worktree_root, worktree in pairs(git.worktrees) do
-      if utils.is_subpath(worktree_root, state.path) then
-        for _, dir in ipairs(worktree.watched_dirs or {}) do
-          fs_watch.unwatch_folder(dir)
-        end
-      end
-    end
-
+    -- Git dirs are deliberately absent here: their watchers belong to the worktree,
+    -- not to this render. Releasing them for the duration of a rescan left a window
+    -- with nothing listening, and inotify does not replay what it missed.
     for _, folder in ipairs(loaded_folders) do
       log.trace("Unwatching folder", folder.path)
       if folder.is_link then

@@ -158,6 +158,7 @@ end
 ---This closes all windows as well since they would be broken by this action.
 M._clear_state = function()
   fs_watch.stop_watching()
+  require("neo-tree.git.watch").unwatch_all()
   renderer.close_all_floating_windows()
   for _, data in pairs(source_data) do
     for _, state in pairs(data.state_by_tab) do
@@ -423,8 +424,11 @@ M.git_status_changed = function(source_name, args)
   -- M.refresh(source_name)
   M._for_each_state(source_name, function(state)
     local state_in_git_root = utils.is_subpath(args.git_root, state.path)
+    -- A repository below the tree root still decorates nodes in it, whether or not
+    -- its own directory has been rendered as a node yet.
+    local git_root_in_state = utils.is_subpath(state.path, args.git_root)
     local root_is_visible = state.tree and state.tree.nodes.by_id[args.git_root] ~= nil
-    if state_in_git_root or root_is_visible then
+    if state_in_git_root or git_root_in_state or root_is_visible then
       renderer.redraw(state)
     end
   end)
