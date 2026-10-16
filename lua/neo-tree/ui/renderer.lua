@@ -765,7 +765,8 @@ M.position.clear = function(state)
 end
 
 ---@param state neotree.State
-M.position.restore = function(state)
+---@param keep_queued_node boolean? Leave a queued node_id for the next draw of new nodes.
+M.position.restore = function(state, keep_queued_node)
   if state.position.topline and state.position.lnum then
     log.debug("Restoring window position to topline:", state.position.topline)
     log.debug("Restoring cursor position to lnum:", state.position.lnum)
@@ -773,14 +774,18 @@ M.position.restore = function(state)
       vim.fn.winrestview({ topline = state.position.topline, lnum = state.position.lnum })
     end)
   end
-  if state.position.node_id then
-    log.debug("Focusing on node_id:", state.position.node_id)
-    M.focus_node(state, state.position.node_id, true)
+  local queued_node_id = state.position.node_id
+  if queued_node_id and not keep_queued_node then
+    log.debug("Focusing on node_id:", queued_node_id)
+    M.focus_node(state, queued_node_id, true)
   end
 
   M.position.restore_selection(state)
 
   M.position.clear(state)
+  if keep_queued_node then
+    state.position.node_id = queued_node_id
+  end
 end
 
 ---@param state neotree.State
@@ -805,7 +810,7 @@ M.redraw = function(state)
     -- every now and then this will fail because the window was closed in
     -- betweeen the start of an async refresh and the redraw call.
     -- This is not a problem, so we just ignore the error.
-    local success = pcall(render_tree, state)
+    local success = pcall(render_tree, state, true)
     if success then
       log.trace("  Redrawing tree done", state.name, state.id)
     else
@@ -1520,7 +1525,9 @@ end
 
 ---Renders the given tree and expands window width if needed
 ---@param state neotree.StateWithTree The state containing tree to render. Almost same as state.tree:render()
-render_tree = function(state)
+---@param keep_queued_node boolean? Re-rendering the existing nodes: leave a queued node_id for
+---the draw that will replace them, as it may not be in this tree, or not where it will be.
+render_tree = function(state, keep_queued_node)
   local add_blank_line_at_top = nt.config.add_blank_line_at_top
   local should_auto_expand = state.window.auto_expand_width and state.current_position ~= "float"
   local should_pre_render = should_auto_expand or state.current_position == "current"
@@ -1555,7 +1562,7 @@ render_tree = function(state)
   end
 
   log.debug("render_tree: Restoring position")
-  M.position.restore(state)
+  M.position.restore(state, keep_queued_node)
   restore_marks(state, marks)
 end
 
